@@ -6,3 +6,4 @@ ta
 plotly
 streamlit-autorefresh
 pytz
+PyPDF2
