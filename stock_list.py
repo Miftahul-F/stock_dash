@@ -4,11 +4,13 @@ import pandas as pd
 import numpy as np
 import ta
 import pytz
-from datetime import datetime
 import math
+import re
+from datetime import datetime
+from PyPDF2 import PdfReader
 
 st.set_page_config(layout="wide")
-st.title("📊 Institutional Quant System – ISSI Top150")
+st.title("📊 Institutional Quant System – ISSI Auto Update")
 
 WIB = pytz.timezone("Asia/Jakarta")
 
@@ -19,25 +21,47 @@ modal = st.sidebar.number_input("Modal (Rp)", value=100_000_000)
 risk_percent = st.sidebar.slider("Risk per Trade (%)", 0.5, 3.0, 1.0)
 
 # =============================
-# ISSI UNIVERSE (Official Feb 2026)
+# EXTRACT ISSI FROM PDF
 # =============================
-ISSI_UNIVERSE = [
-"AADI","AALI","ABMM","ACES","ACST","ADCP","ADES","ADHI","ADMR","ADRO",
-"AKRA","ANTM","ASII","BRIS","BRMS","BRPT","BUMI","CPIN","DSSA","EXCL",
-"ICBP","INCO","INDF","INKP","ISAT","ITMG","JPFA","JSMR","KLBF","LSIP",
-"MAPA","MAPI","MEDC","NISP","PGAS","SMDR","TLKM","UNTR","UNVR",
-# (dipotong di sini demi keterbacaan)
-]
+@st.cache_data(ttl=3600)
+def extract_issi_from_pdf(pdf_path):
 
-ISSI_UNIVERSE = [x + ".JK" for x in ISSI_UNIVERSE]
+    reader = PdfReader(pdf_path)
+    text = ""
+
+    for page in reader.pages:
+        text += page.extract_text()
+
+    # Ambil kode saham 4 huruf kapital
+    codes = set(re.findall(r"\b[A-Z]{4}\b", text))
+
+    # Filter out non-ticker noise (contoh umum)
+    blacklist = ["BEI","ISSI","JII","IDX","MBX","DBX","ABX"]
+    codes = [c for c in codes if c not in blacklist]
+
+    return sorted(list(codes))
+
+try:
+    ISSI_CODES = extract_issi_from_pdf("issi_latest.pdf")
+    ISSI_UNIVERSE = [x + ".JK" for x in ISSI_CODES]
+    st.success(f"ISSI Universe Loaded: {len(ISSI_UNIVERSE)} saham")
+except:
+    st.error("File issi_latest.pdf tidak ditemukan.")
+    st.stop()
 
 # =============================
 # SAFE DATA LOADER
 # =============================
 @st.cache_data(ttl=3600)
 def get_data(ticker, interval="1d", period="6mo"):
-    df = yf.download(ticker, interval=interval, period=period,
-                     auto_adjust=True, progress=False)
+    df = yf.download(
+        ticker,
+        interval=interval,
+        period=period,
+        auto_adjust=True,
+        progress=False
+    )
+
     if df is None or df.empty:
         return None
 
@@ -60,6 +84,7 @@ st.subheader("🔎 Generating Top150 Liquid ISSI...")
 liquidity_data = []
 
 for ticker in ISSI_UNIVERSE:
+
     df = get_data(ticker, "1d", "3mo")
     if df is None or len(df) < 40:
         continue
