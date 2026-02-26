@@ -8,9 +8,10 @@ import math
 import re
 from datetime import datetime
 from PyPDF2 import PdfReader
+import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("📊 Institutional Quant System – ISSI Auto Update")
+st.title("📊 Institutional Semi-Auto Swing v8 (Top 3 Rotation)")
 
 WIB = pytz.timezone("Asia/Jakarta")
 
@@ -25,20 +26,21 @@ risk_percent = st.sidebar.slider("Risk per Trade (%)", 0.5, 3.0, 1.0)
 # =============================
 @st.cache_data(ttl=3600)
 def extract_issi_from_pdf(pdf_path):
-
     reader = PdfReader(pdf_path)
     text = ""
-
     for page in reader.pages:
-        text += page.extract_text()
+        if page.extract_text():
+            text += page.extract_text()
 
-    # Ambil kode saham 4 huruf kapital
-    codes = set(re.findall(r"\b[A-Z]{4}\b", text))
+    # Ambil kode 3-5 huruf kapital
+    codes = set(re.findall(r"\b[A-Z]{3,5}\b", text))
 
-    # Filter out non-ticker noise (contoh umum)
-    blacklist = ["BEI","ISSI","JII","IDX","MBX","DBX","ABX"]
+    blacklist = [
+        "BEI","ISSI","JII","IDX","MBX","DBX","ABX",
+        "Lampiran","Evaluasi","Minor","Mayor"
+    ]
+
     codes = [c for c in codes if c not in blacklist]
-
     return sorted(list(codes))
 
 try:
@@ -50,17 +52,12 @@ except:
     st.stop()
 
 # =============================
-# SAFE DATA LOADER
+# DATA LOADER
 # =============================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_data(ticker, interval="1d", period="6mo"):
-    df = yf.download(
-        ticker,
-        interval=interval,
-        period=period,
-        auto_adjust=True,
-        progress=False
-    )
+    df = yf.download(ticker, interval=interval, period=period,
+                     auto_adjust=True, progress=False)
 
     if df is None or df.empty:
         return None
@@ -77,35 +74,37 @@ def get_data(ticker, interval="1d", period="6mo"):
     return df
 
 # =============================
-# STEP 1 – LIQUIDITY RANKING
+# STEP 1 – TOP150 LIQUID
 # =============================
 st.subheader("🔎 Generating Top150 Liquid ISSI...")
 
-liquidity_data = []
+liquidity = []
 
 for ticker in ISSI_UNIVERSE:
-
     df = get_data(ticker, "1d", "3mo")
     if df is None or len(df) < 40:
         continue
 
     avg_value = (df["Close"] * df["Volume"]).mean()
 
-    liquidity_data.append({
+    liquidity.append({
         "Ticker": ticker,
         "AvgValue": avg_value
     })
 
-df_liq = pd.DataFrame(liquidity_data)
+df_liq = pd.DataFrame(liquidity)
+
+if df_liq.empty:
+    st.warning("Tidak ada data liquidity.")
+    st.stop()
 
 df_liq = df_liq.sort_values("AvgValue", ascending=False)
-
 top150 = df_liq.head(150)["Ticker"].tolist()
 
 st.success(f"Top150 ISSI selected ({len(top150)} saham)")
 
 # =============================
-# STEP 2 – QUANT RANKING
+# STEP 2 – DAILY QUANT RANKING
 # =============================
 ranking = []
 
@@ -148,17 +147,16 @@ for ticker in top150:
 
 df_rank = pd.DataFrame(ranking).sort_values("Score", ascending=False)
 
-st.subheader("📈 Top Quant Ranking")
-st.dataframe(df_rank.head(10), use_container_width=True)
+st.subheader("📈 Top 3 Rotation")
+top3 = df_rank.head(3)
+st.dataframe(top3, use_container_width=True)
 
 # =============================
 # STEP 3 – EXECUTION MODEL
 # =============================
-st.subheader("🎯 Execution Model (Top 5)")
+st.subheader("🎯 Execution Plan (Breakout 1H Only)")
 
-top_exec = df_rank.head(5)["Ticker"].tolist()
-
-for ticker in top_exec:
+for ticker in top3["Ticker"]:
 
     df = get_data(ticker, "1h", "30d")
     if df is None or len(df) < 20:
@@ -170,21 +168,63 @@ for ticker in top_exec:
     ).average_true_range()
 
     row = df.iloc[-1]
+    last_time = df.index[-1]
+    now_time = datetime.now(WIB)
+    delay = (now_time - last_time).total_seconds() / 60
 
-    if row["Close"] > row["EMA20"]:
+    # ENTRY BREAKOUT
+    buffer = 0.001 * row["Close"]
+    entry = row["High"] + buffer
+    sl = entry - row["ATR"]
+    risk = entry - sl
+    tp = entry + risk * 2
 
-        buffer = 0.001 * row["Close"]
-        entry = row["High"] + buffer
-        sl = entry - row["ATR"]
-        risk = entry - sl
-        tp = entry + risk * 2.2
+    risk_amount = modal * (risk_percent / 100)
+    raw_size = risk_amount / risk
 
-        risk_amount = modal * (risk_percent / 100)
-        size = math.floor((risk_amount / risk) / 100) * 100
+    if raw_size < 100:
+        size = 100
+    else:
+        size = math.floor(raw_size / 100) * 100
 
-        st.write(f"### {ticker}")
-        st.write(f"Entry Stop : Rp {entry:,.0f}")
-        st.write(f"Stop Loss  : Rp {sl:,.0f}")
-        st.write(f"Take Profit: Rp {tp:,.0f}")
-        st.write(f"Position Size: {size:,} saham ({size//100} lot)")
-        st.write("---")
+    st.markdown(f"### {ticker}")
+    st.write(f"Entry Stop : Rp {entry:,.0f}")
+    st.write(f"Stop Loss  : Rp {sl:,.0f}")
+    st.write(f"Take Profit: Rp {tp:,.0f}")
+    st.write(f"Position Size: {size:,} saham ({size//100} lot)")
+    st.write(f"Data Delay: {round(delay,1)} menit")
+    st.write("Max Hold: 3 hari")
+    
+    # =============================
+    # CHART
+    # =============================
+    fig = go.Figure()
+
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name="Price"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["EMA20"],
+        name="EMA20"
+    ))
+
+    fig.add_hline(y=entry, line_dash="dot", annotation_text="Entry")
+    fig.add_hline(y=sl, line_dash="dot", annotation_text="SL")
+    fig.add_hline(y=tp, line_dash="dot", annotation_text="TP")
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=500,
+        xaxis_title="Waktu (WIB)",
+        yaxis_title="Harga"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.write("---")
