@@ -5,3 +5,4 @@ numpy
 ta
 plotly
 streamlit-autorefresh
+pytz
